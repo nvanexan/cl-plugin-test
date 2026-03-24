@@ -1,0 +1,23 @@
+{
+  "repository": {
+    "owner": "nvanexan",
+    "name": "cl-plugin-test"
+  },
+  "project": {
+    "number": 17,
+    "name": "cl-plugin-test",
+    "fields": {
+      "statusOptions": ["Backlog", "Todo", "In Progress", "In Review", "Done"],
+      "priorityOptions": ["P0", "P1", "P2", "P3", "P4", "P5"],
+      "sizeOptions": ["XS", "S", "M", "L", "XL"],
+      "statusMapping": {
+        "backlog": "Backlog",
+        "ready": "Todo",
+        "inProgress": "In Progress",
+        "inReview": "In Review",
+        "done": "Done"
+      }
+    }
+  },
+  "version": "0.1.0"
+}

@@ -1,0 +1,554 @@
+# Scaffolded by /codelantern:init — handles @codelantern comment-driven commands.
+#
+# Triggered by repository_dispatch from the CodeLantern GitHub App webhook.
+# The webhook parses @codelantern /command mentions in issue/PR comments and
+# fires a dispatch event with the parsed command payload.
+#
+# Commands (via repository_dispatch):
+#   /architect     → runs /architect skill (requires cl-spec-complete)
+#   /implement     → runs /implement skill (requires cl-plan-ready or cl-plan-approved)
+#   /review        → runs /review skill (PR context only)
+#   /approve-plan  → approves the plan (swaps labels, updates plan file + PR body)
+#   /consolidate   → runs /consolidate skill (updates KB + session log)
+#   (free-form)    → runs freeform with the prompt text
+#
+# Required secrets:
+#   CODELANTERN_APP_ID          — GitHub App numeric ID
+#   CODELANTERN_APP_PRIVATE_KEY — GitHub App PEM private key (base64-encoded)
+#   COPILOT_GITHUB_TOKEN        — Fine-grained PAT with "Copilot Requests" permission
+#
+
+name: CodeLantern Dispatch
+
+on:
+  repository_dispatch:
+    types: [codelantern-command]
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+jobs:
+  run-command:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'repository_dispatch'
+    timeout-minutes: 60
+
+    steps:
+      # ─── Generate App token for bot identity ────────────────────────────
+      - name: Generate App token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.CODELANTERN_APP_ID }}
+          private-key: ${{ secrets.CODELANTERN_APP_PRIVATE_KEY }}
+
+      # ─── Extract payload fields ─────────────────────────────────────────
+      - name: Extract payload
+        id: payload
+        env:
+          PAYLOAD_COMMAND: ${{ github.event.client_payload.command }}
+          PAYLOAD_PROMPT: ${{ github.event.client_payload.prompt }}
+          PAYLOAD_MODEL: ${{ github.event.client_payload.model }}
+          PAYLOAD_ISSUE_NUMBER: ${{ github.event.client_payload.issue_number }}
+          PAYLOAD_COMMENT_ID: ${{ github.event.client_payload.comment_id }}
+          PAYLOAD_CONTEXT: ${{ github.event.client_payload.context }}
+          PAYLOAD_PR_BRANCH: ${{ github.event.client_payload.pr_branch }}
+          PAYLOAD_SENDER: ${{ github.event.client_payload.sender }}
+        run: |
+          echo "command=$PAYLOAD_COMMAND" >> "$GITHUB_OUTPUT"
+          echo "prompt<<EOF" >> "$GITHUB_OUTPUT"
+          echo "$PAYLOAD_PROMPT" >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+          echo "model=$PAYLOAD_MODEL" >> "$GITHUB_OUTPUT"
+          echo "issue_number=$PAYLOAD_ISSUE_NUMBER" >> "$GITHUB_OUTPUT"
+          echo "comment_id=$PAYLOAD_COMMENT_ID" >> "$GITHUB_OUTPUT"
+          echo "context=$PAYLOAD_CONTEXT" >> "$GITHUB_OUTPUT"
+          echo "pr_branch=$PAYLOAD_PR_BRANCH" >> "$GITHUB_OUTPUT"
+          echo "sender=$PAYLOAD_SENDER" >> "$GITHUB_OUTPUT"
+
+      # ─── Resolve linked issue and PR numbers ────────────────────────────
+      - name: Resolve linked issue and PR
+        id: resolve
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          CONTEXT="${{ steps.payload.outputs.context }}"
+          PAYLOAD_NUMBER="${{ steps.payload.outputs.issue_number }}"
+          REPO="${{ github.repository }}"
+
+          if [ "$CONTEXT" = "pr" ]; then
+            PR_NUMBER="$PAYLOAD_NUMBER"
+            echo "pr_number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
+            PR_BODY=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json body --jq '.body' 2>/dev/null || echo "")
+            LINKED_ISSUE=$(echo "$PR_BODY" | sed -n 's/.*\(Closes\|Fixes\|Resolves\|Implements\|Issue:\)\s*#*\([0-9]\+\).*/\2/p' | head -1)
+            if [ -z "$LINKED_ISSUE" ]; then
+              LINKED_ISSUE=$(echo "$PR_BODY" | sed -n 's/.*#\([0-9]\+\).*/\1/p' | head -1)
+            fi
+            echo "issue_number=${LINKED_ISSUE:-}" >> "$GITHUB_OUTPUT"
+          else
+            ISSUE_NUMBER="$PAYLOAD_NUMBER"
+            echo "issue_number=$ISSUE_NUMBER" >> "$GITHUB_OUTPUT"
+            PR_NUMBER=$(gh pr list --repo "$REPO" \
+              --search "$ISSUE_NUMBER" \
+              --json number --jq '.[0].number' 2>/dev/null || echo "")
+            echo "pr_number=${PR_NUMBER:-}" >> "$GITHUB_OUTPUT"
+          fi
+
+      # ─── Route command → skill, model, guards ───────────────────────────
+      - name: Route command
+        id: route
+        run: |
+          COMMAND="${{ steps.payload.outputs.command }}"
+          PAYLOAD_MODEL="${{ steps.payload.outputs.model }}"
+
+          case "$COMMAND" in
+            architect)
+              echo "skill=architect" >> "$GITHUB_OUTPUT"
+              echo "default_model=claude-sonnet-4.6" >> "$GITHUB_OUTPUT"
+              echo "required_label=cl-spec-complete" >> "$GITHUB_OUTPUT"
+              echo "guard_message=Cannot run /architect: the issue is missing the \`cl-spec-complete\` label. Please ensure the spec is complete first." >> "$GITHUB_OUTPUT"
+              echo "success_label=cl-plan-ready" >> "$GITHUB_OUTPUT"
+              ;;
+            implement)
+              echo "skill=implement" >> "$GITHUB_OUTPUT"
+              echo "default_model=claude-sonnet-4.6" >> "$GITHUB_OUTPUT"
+              echo "required_label=cl-plan-ready,cl-plan-approved" >> "$GITHUB_OUTPUT"
+              echo "guard_message=Cannot run /implement: the issue needs the \`cl-plan-ready\` or \`cl-plan-approved\` label. Please run \`/architect\` first." >> "$GITHUB_OUTPUT"
+              echo "success_label=cl-implementation-complete" >> "$GITHUB_OUTPUT"
+              echo "start_label=cl-implementing" >> "$GITHUB_OUTPUT"
+              ;;
+            review)
+              echo "skill=review" >> "$GITHUB_OUTPUT"
+              echo "default_model=claude-sonnet-4.6" >> "$GITHUB_OUTPUT"
+              echo "required_label=" >> "$GITHUB_OUTPUT"
+              echo "guard_message=" >> "$GITHUB_OUTPUT"
+              echo "success_label=" >> "$GITHUB_OUTPUT"
+              ;;
+            consolidate)
+              echo "skill=consolidate" >> "$GITHUB_OUTPUT"
+              echo "default_model=claude-sonnet-4.6" >> "$GITHUB_OUTPUT"
+              echo "required_label=" >> "$GITHUB_OUTPUT"
+              echo "guard_message=" >> "$GITHUB_OUTPUT"
+              echo "success_label=" >> "$GITHUB_OUTPUT"
+              ;;
+            approve-plan)
+              echo "skill=approve-plan" >> "$GITHUB_OUTPUT"
+              echo "default_model=claude-sonnet-4.6" >> "$GITHUB_OUTPUT"
+              echo "required_label=cl-plan-ready" >> "$GITHUB_OUTPUT"
+              echo "guard_message=Cannot run /approve-plan: the issue is missing the \`cl-plan-ready\` label. The plan must be ready before it can be approved." >> "$GITHUB_OUTPUT"
+              echo "success_label=" >> "$GITHUB_OUTPUT"
+              echo "skip_agent=true" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "skill=freeform" >> "$GITHUB_OUTPUT"
+              echo "default_model=claude-sonnet-4.6" >> "$GITHUB_OUTPUT"
+              echo "required_label=" >> "$GITHUB_OUTPUT"
+              echo "guard_message=" >> "$GITHUB_OUTPUT"
+              echo "success_label=" >> "$GITHUB_OUTPUT"
+              ;;
+          esac
+
+          if [ -n "$PAYLOAD_MODEL" ]; then
+            echo "model=$PAYLOAD_MODEL" >> "$GITHUB_OUTPUT"
+          else
+            echo "model=$(cat "$GITHUB_OUTPUT" | grep '^default_model=' | cut -d= -f2)" >> "$GITHUB_OUTPUT"
+          fi
+
+      # ─── Validate prerequisite label (if required) ──────────────────────
+      - name: Validate prerequisites
+        id: guard
+        if: steps.route.outputs.required_label != ''
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          REQUIRED="${{ steps.route.outputs.required_label }}"
+          ISSUE="${{ steps.resolve.outputs.issue_number }}"
+          REPO="${{ github.repository }}"
+
+          if [ -z "$ISSUE" ]; then
+            ISSUE="${{ steps.payload.outputs.issue_number }}"
+          fi
+
+          LABELS=$(gh issue view "$ISSUE" --repo "$REPO" --json labels --jq '.labels[].name')
+
+          PASS=false
+          IFS=',' read -ra REQUIRED_LABELS <<< "$REQUIRED"
+          for REQ in "${REQUIRED_LABELS[@]}"; do
+            if echo "$LABELS" | grep -qx "$REQ"; then
+              PASS=true
+              break
+            fi
+          done
+
+          if [ "$PASS" = "true" ]; then
+            echo "pass=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "pass=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Post guard failure comment
+        if: steps.guard.outputs.pass == 'false'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          GUARD_MESSAGE: ${{ steps.route.outputs.guard_message }}
+        run: |
+          gh issue comment "${{ steps.payload.outputs.issue_number }}" \
+            --repo "${{ github.repository }}" \
+            --body "$GUARD_MESSAGE"
+
+      # ─── Approve Plan (no agent needed) ───────────────────────────────
+      - name: Approve plan — swap labels
+        if: steps.guard.outputs.pass != 'false' && steps.route.outputs.skip_agent == 'true'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          ISSUE="${{ steps.resolve.outputs.issue_number }}"
+          REPO="${{ github.repository }}"
+          SENDER="${{ steps.payload.outputs.sender }}"
+
+          if [ -z "$ISSUE" ]; then
+            ISSUE="${{ steps.payload.outputs.issue_number }}"
+          fi
+
+          if [ -n "$ISSUE" ]; then
+            gh api "repos/${REPO}/issues/${ISSUE}/labels" --method POST -f "labels[]=cl-plan-approved" --silent 2>/dev/null || true
+            gh api "repos/${REPO}/issues/${ISSUE}/labels/cl-plan-ready" --method DELETE --silent 2>/dev/null || true
+          fi
+
+          echo "Plan approved by @${SENDER} via /approve-plan."
+
+      - name: Approve plan — update plan file
+        if: steps.guard.outputs.pass != 'false' && steps.route.outputs.skip_agent == 'true' && steps.resolve.outputs.pr_number != ''
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          ISSUE="${{ steps.resolve.outputs.issue_number }}"
+          PR_NUMBER="${{ steps.resolve.outputs.pr_number }}"
+          REPO="${{ github.repository }}"
+          SENDER="${{ steps.payload.outputs.sender }}"
+
+          if [ -z "$ISSUE" ]; then
+            ISSUE="${{ steps.payload.outputs.issue_number }}"
+          fi
+
+          PR_BRANCH=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json headRefName --jq '.headRefName')
+          git clone --depth=1 --branch "$PR_BRANCH" "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git" _approve_workdir
+          cd _approve_workdir
+
+          git config user.name "$SENDER"
+          git config user.email "${SENDER}@users.noreply.github.com"
+
+          PLAN_FILE=".codelantern/plans/issue-${ISSUE}.md"
+          if [ -f "$PLAN_FILE" ]; then
+            sed -i 's/\*\*Status:\*\* Planning/\*\*Status:\*\* Approved/' "$PLAN_FILE"
+            git add "$PLAN_FILE"
+            git diff --cached --quiet || {
+              git commit -m "docs: plan approved for issue #${ISSUE}"
+              git push
+            }
+          fi
+
+      - name: Approve plan — update PR body
+        if: steps.guard.outputs.pass != 'false' && steps.route.outputs.skip_agent == 'true' && steps.resolve.outputs.pr_number != ''
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          PR_NUMBER="${{ steps.resolve.outputs.pr_number }}"
+          REPO="${{ github.repository }}"
+
+          BODY=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json body --jq '.body')
+          BODY=$(echo "$BODY" | sed 's/⏳ \*\*Awaiting Plan Approval\*\*.*/✅ **Plan Approved** - Ready for `\/implement`/')
+          BODY=$(echo "$BODY" | sed 's/🚧 \*\*Planning\*\*.*/✅ **Plan Approved** - Ready for `\/implement`/')
+          BODY=$(echo "$BODY" | sed 's/- \[ \] Technical plan approved/- [x] Technical plan approved/')
+
+          gh api "repos/${REPO}/pulls/${PR_NUMBER}" --method PATCH -f body="$BODY" --silent
+
+      - name: Approve plan — post confirmation
+        if: steps.guard.outputs.pass != 'false' && steps.route.outputs.skip_agent == 'true' && steps.resolve.outputs.issue_number != ''
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          gh issue comment "${{ steps.resolve.outputs.issue_number }}" \
+            --repo "${{ github.repository }}" \
+            --body "Plan approved by @${{ steps.payload.outputs.sender }}. Run \`/implement\` when ready."
+
+      # ─── Implicit plan approval for /implement ─────────────────────────
+      - name: Implicit plan approval
+        if: steps.guard.outputs.pass != 'false' && steps.route.outputs.skip_agent != 'true' && steps.route.outputs.skill == 'implement'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          ISSUE="${{ steps.resolve.outputs.issue_number }}"
+          REPO="${{ github.repository }}"
+          SENDER="${{ steps.payload.outputs.sender }}"
+
+          if [ -z "$ISSUE" ]; then
+            ISSUE="${{ steps.payload.outputs.issue_number }}"
+          fi
+
+          LABELS=$(gh issue view "$ISSUE" --repo "$REPO" --json labels --jq '.labels[].name')
+          if echo "$LABELS" | grep -qx "cl-plan-approved"; then
+            echo "Already approved — skipping implicit approval."
+            exit 0
+          fi
+
+          gh api "repos/${REPO}/issues/${ISSUE}/labels" --method POST -f "labels[]=cl-plan-approved" --silent 2>/dev/null || true
+          gh api "repos/${REPO}/issues/${ISSUE}/labels/cl-plan-ready" --method DELETE --silent 2>/dev/null || true
+
+          echo "Plan implicitly approved by @${SENDER} via /implement."
+
+      # ─── Post progress comment ──────────────────────────────────────────
+      - name: Post progress comment
+        if: steps.guard.outputs.pass != 'false' && steps.route.outputs.skip_agent != 'true'
+        id: progress
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          SKILL="${{ steps.route.outputs.skill }}"
+          ISSUE="${{ steps.payload.outputs.issue_number }}"
+          REPO="${{ github.repository }}"
+
+          if [ "$SKILL" = "freeform" ]; then
+            BODY="Working on your request..."
+          else
+            BODY="Running \`/$SKILL\`..."
+          fi
+
+          BODY="$BODY\n\n<sub>Run: [${{ github.run_id }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})</sub>"
+
+          COMMENT_URL=$(gh issue comment "$ISSUE" --repo "$REPO" --body "$(echo -e "$BODY")" --json url --jq '.url' 2>/dev/null || gh issue comment "$ISSUE" --repo "$REPO" --body "$(echo -e "$BODY")")
+          echo "comment_url=$COMMENT_URL" >> "$GITHUB_OUTPUT"
+
+      # ─── Add start label to issue ───────────────────────────────────────
+      - name: Add start label
+        if: steps.guard.outputs.pass != 'false' && steps.route.outputs.skip_agent != 'true' && steps.route.outputs.start_label != ''
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          ISSUE="${{ steps.resolve.outputs.issue_number }}"
+          REPO="${{ github.repository }}"
+          LABEL="${{ steps.route.outputs.start_label }}"
+
+          if [ -n "$ISSUE" ]; then
+            gh api "repos/${REPO}/issues/${ISSUE}/labels" --method POST -f "labels[]=$LABEL" --silent 2>/dev/null || true
+          fi
+
+      # ─── Post implementation start comment ──────────────────────────────
+      - name: Post implementation start comment on issue
+        if: steps.guard.outputs.pass != 'false' && steps.route.outputs.skip_agent != 'true' && steps.route.outputs.skill == 'implement' && steps.resolve.outputs.issue_number != '' && steps.resolve.outputs.pr_number != ''
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          ISSUE="${{ steps.resolve.outputs.issue_number }}"
+          PR_NUMBER="${{ steps.resolve.outputs.pr_number }}"
+          REPO="${{ github.repository }}"
+          SENDER="${{ steps.payload.outputs.sender }}"
+
+          gh issue comment "$ISSUE" --repo "$REPO" \
+            --body "Implementation started by @${SENDER}. See PR #${PR_NUMBER} for progress."
+
+      # ─── Claim issue (assign sender) ──────────────────────────────────
+      - name: Claim issue
+        if: steps.guard.outputs.pass != 'false' && steps.route.outputs.skip_agent != 'true'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          gh api "repos/${{ github.repository }}/issues/${{ steps.payload.outputs.issue_number }}/assignees" \
+            --method POST \
+            -f "assignees[]=${{ steps.payload.outputs.sender }}" \
+            --silent
+
+      # ─── Checkout repository ─────────────────────────────────────────────
+      - name: Checkout repository
+        if: steps.guard.outputs.pass != 'false' && steps.route.outputs.skip_agent != 'true'
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ steps.app-token.outputs.token }}
+
+      # ─── Branch resolution ──────────────────────────────────────────────
+      - name: Resolve branch
+        if: steps.guard.outputs.pass != 'false' && steps.route.outputs.skip_agent != 'true'
+        id: branch
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          CONTEXT="${{ steps.payload.outputs.context }}"
+          PR_BRANCH="${{ steps.payload.outputs.pr_branch }}"
+          ISSUE="${{ steps.payload.outputs.issue_number }}"
+          REPO="${{ github.repository }}"
+
+          if [ "$CONTEXT" = "pr" ] && [ -n "$PR_BRANCH" ]; then
+            echo "ref=$PR_BRANCH" >> "$GITHUB_OUTPUT"
+            git checkout "$PR_BRANCH"
+          else
+            EXISTING_BRANCH=$(git branch -r --list "origin/codelantern/issue-${ISSUE}-*" | head -1 | sed 's|origin/||' | xargs)
+
+            if [ -n "$EXISTING_BRANCH" ]; then
+              echo "ref=$EXISTING_BRANCH" >> "$GITHUB_OUTPUT"
+              git checkout "$EXISTING_BRANCH"
+            else
+              LINKED_PR=$(gh pr list --repo "$REPO" --search "issue:${ISSUE}" --json headRefName --jq '.[0].headRefName' 2>/dev/null || echo "")
+
+              if [ -n "$LINKED_PR" ]; then
+                echo "ref=$LINKED_PR" >> "$GITHUB_OUTPUT"
+                git checkout "$LINKED_PR"
+              else
+                echo "ref=${{ github.event.repository.default_branch }}" >> "$GITHUB_OUTPUT"
+              fi
+            fi
+          fi
+
+      # ─── Setup Node.js ──────────────────────────────────────────────────
+      - name: Setup Node.js
+        if: steps.guard.outputs.pass != 'false' && steps.route.outputs.skip_agent != 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install project dependencies
+        if: steps.guard.outputs.pass != 'false' && steps.route.outputs.skip_agent != 'true'
+        run: |
+          if [ -f "bun.lockb" ] || [ -f "bun.lock" ]; then
+            npx --yes bun install --frozen-lockfile
+          elif [ -f "pnpm-lock.yaml" ]; then
+            npx --yes pnpm install --frozen-lockfile
+          elif [ -f "yarn.lock" ]; then
+            yarn install --frozen-lockfile
+          else
+            npm install
+          fi
+
+      - name: Install Copilot CLI and SDK
+        if: steps.guard.outputs.pass != 'false' && steps.route.outputs.skip_agent != 'true'
+        run: |
+          npm i -g @github/copilot
+          npm i --no-save @github/copilot-sdk
+
+      # ─── Clone CodeLantern plugin ───────────────────────────────────────
+      - name: Clone CodeLantern plugin
+        if: steps.guard.outputs.pass != 'false' && steps.route.outputs.skip_agent != 'true'
+        run: git clone --depth=1 https://github.com/nvanexan/cl-plugin .cl-plugin
+
+      # ─── Configure git identity ─────────────────────────────────────────
+      - name: Configure git identity
+        if: steps.guard.outputs.pass != 'false' && steps.route.outputs.skip_agent != 'true'
+        run: |
+          git config user.name "${{ steps.payload.outputs.sender }}"
+          git config user.email "${{ steps.payload.outputs.sender }}@users.noreply.github.com"
+
+      # ─── Run the agent ──────────────────────────────────────────────────
+      - name: Run agent
+        if: steps.guard.outputs.pass != 'false' && steps.route.outputs.skip_agent != 'true'
+        env:
+          COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          GH_PROJECT_TOKEN: ${{ secrets.GH_PROJECT_TOKEN }}
+          ISSUE_NUMBER: ${{ steps.payload.outputs.issue_number }}
+          COMMENT_ID: ${{ steps.payload.outputs.comment_id }}
+          REPO: ${{ github.repository }}
+          SKILL: ${{ steps.route.outputs.skill }}
+          MODEL: ${{ steps.route.outputs.model }}
+          PROMPT: ${{ steps.payload.outputs.prompt }}
+          CONTEXT: ${{ steps.payload.outputs.context }}
+          PR_BRANCH: ${{ steps.branch.outputs.ref }}
+          SENDER: ${{ steps.payload.outputs.sender }}
+        run: node .github/scripts/run-agent.mjs
+
+      # ─── Update progress comment with result ────────────────────────────
+      - name: Update progress comment (success)
+        if: success() && steps.guard.outputs.pass != 'false' && steps.route.outputs.skip_agent != 'true'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          ISSUE="${{ steps.payload.outputs.issue_number }}"
+          REPO="${{ github.repository }}"
+          SKILL="${{ steps.route.outputs.skill }}"
+
+          if [ "$SKILL" = "implement" ]; then
+            AGENT_OUTPUT="Implementation complete — ready for review."
+          elif [ "$SKILL" = "architect" ]; then
+            AGENT_OUTPUT="Technical plan ready for review."
+          elif [ -f ".codelantern/.agent-output" ]; then
+            AGENT_OUTPUT=$(cat .codelantern/.agent-output)
+          else
+            AGENT_OUTPUT="Completed successfully."
+          fi
+
+          BODY="$AGENT_OUTPUT\n\n<sub>Run: [${{ github.run_id }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) | Skill: \`$SKILL\`</sub>"
+
+          if [ -n "${{ steps.progress.outputs.comment_url }}" ]; then
+            COMMENT_ID=$(echo "${{ steps.progress.outputs.comment_url }}" | grep -o '[0-9]*$')
+            gh api repos/$REPO/issues/comments/$COMMENT_ID \
+              -X PATCH \
+              -f body="$(echo -e "$BODY")" 2>/dev/null || \
+            gh issue comment "$ISSUE" --repo "$REPO" --body "$(echo -e "$BODY")"
+          else
+            gh issue comment "$ISSUE" --repo "$REPO" --body "$(echo -e "$BODY")"
+          fi
+
+      - name: Update progress comment (failure)
+        if: failure() && steps.guard.outputs.pass != 'false' && steps.route.outputs.skip_agent != 'true'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          ISSUE="${{ steps.payload.outputs.issue_number }}"
+          REPO="${{ github.repository }}"
+          SKILL="${{ steps.route.outputs.skill }}"
+
+          BODY="The \`/$SKILL\` command failed. Check the [workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) for details."
+
+          gh issue comment "$ISSUE" --repo "$REPO" --body "$BODY"
+
+      # ─── Label management ───────────────────────────────────────────────
+      - name: Add success label
+        if: success() && steps.guard.outputs.pass != 'false' && steps.route.outputs.skip_agent != 'true' && steps.route.outputs.success_label != ''
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          ISSUE="${{ steps.resolve.outputs.issue_number }}"
+          REPO="${{ github.repository }}"
+          LABEL="${{ steps.route.outputs.success_label }}"
+
+          if [ -n "$ISSUE" ]; then
+            gh api "repos/${REPO}/issues/${ISSUE}/labels" --method POST -f "labels[]=$LABEL" --silent 2>/dev/null || true
+          fi
+
+      # ─── Mark PR ready for review ──────────────────────────────────────
+      - name: Mark PR ready for review
+        if: success() && steps.guard.outputs.pass != 'false' && steps.route.outputs.skip_agent != 'true' && steps.route.outputs.skill == 'implement' && steps.resolve.outputs.pr_number != ''
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          PR_NUMBER="${{ steps.resolve.outputs.pr_number }}"
+          REPO="${{ github.repository }}"
+          gh pr ready "$PR_NUMBER" --repo "$REPO" 2>/dev/null || true
+
+      # ─── Post implementation complete comment ───────────────────────────
+      - name: Post implementation complete comment on issue
+        if: success() && steps.guard.outputs.pass != 'false' && steps.route.outputs.skip_agent != 'true' && steps.route.outputs.skill == 'implement' && steps.resolve.outputs.issue_number != '' && steps.resolve.outputs.pr_number != ''
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          ISSUE="${{ steps.resolve.outputs.issue_number }}"
+          PR_NUMBER="${{ steps.resolve.outputs.pr_number }}"
+          REPO="${{ github.repository }}"
+
+          gh issue comment "$ISSUE" --repo "$REPO" \
+            --body "Implementation complete. See PR #${PR_NUMBER} for details and review."
+
+      - name: Remove start label
+        if: always() && steps.guard.outputs.pass != 'false' && steps.route.outputs.skip_agent != 'true' && steps.route.outputs.start_label != ''
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          ISSUE="${{ steps.resolve.outputs.issue_number }}"
+          REPO="${{ github.repository }}"
+          LABEL="${{ steps.route.outputs.start_label }}"
+
+          if [ -n "$ISSUE" ]; then
+            gh api "repos/${REPO}/issues/${ISSUE}/labels/${LABEL}" --method DELETE --silent 2>/dev/null || true
+          fi
