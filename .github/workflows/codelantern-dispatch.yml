@@ -384,20 +384,15 @@ jobs:
             echo "ref=$PR_BRANCH" >> "$GITHUB_OUTPUT"
             git checkout "$PR_BRANCH"
           else
-            EXISTING_BRANCH=$(git branch -r --list "origin/codelantern/issue-${ISSUE}-*" | head -1 | sed 's|origin/||' | xargs)
+            # Look for branches matching our naming convention: */issue-{N} or *-issue-{N}
+            EXISTING_BRANCH=$(git branch -r | grep -E "issue-${ISSUE}($|-|/)" | head -1 | sed 's|origin/||' | xargs)
 
             if [ -n "$EXISTING_BRANCH" ]; then
               echo "ref=$EXISTING_BRANCH" >> "$GITHUB_OUTPUT"
               git checkout "$EXISTING_BRANCH"
             else
-              LINKED_PR=$(gh pr list --repo "$REPO" --search "issue:${ISSUE}" --json headRefName --jq '.[0].headRefName' 2>/dev/null || echo "")
-
-              if [ -n "$LINKED_PR" ]; then
-                echo "ref=$LINKED_PR" >> "$GITHUB_OUTPUT"
-                git checkout "$LINKED_PR"
-              else
-                echo "ref=${{ github.event.repository.default_branch }}" >> "$GITHUB_OUTPUT"
-              fi
+              # Stay on default branch — the agent will create a feature branch if needed
+              echo "ref=${{ github.event.repository.default_branch }}" >> "$GITHUB_OUTPUT"
             fi
           fi
 
