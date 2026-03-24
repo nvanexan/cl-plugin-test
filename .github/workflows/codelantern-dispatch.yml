@@ -430,9 +430,7 @@ jobs:
       # ─── Clone CodeLantern plugin ───────────────────────────────────────
       - name: Clone CodeLantern plugin
         if: steps.guard.outputs.pass != 'false' && steps.route.outputs.skip_agent != 'true'
-        env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
-        run: git clone --depth=1 https://x-access-token:${GH_TOKEN}@github.com/nvanexan/cl-plugin .cl-plugin
+        run: git clone --depth=1 https://x-access-token:${{ secrets.PLUGIN_CLONE_TOKEN }}@github.com/nvanexan/cl-plugin .cl-plugin
 
       # ─── Configure git identity ─────────────────────────────────────────
       - name: Configure git identity
