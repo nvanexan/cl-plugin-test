@@ -9,7 +9,8 @@
 
 | Timestamp | Skill | Notes |
 |-----------|-------|-------|
-| 2026-03-24T19:23:00Z | /architect | Creating plan and draft PR |
+| 2026-03-24T19:23:00Z | /architect | Created plan and draft PR |
+| 2026-03-24T19:35:00Z | /implement | Implemented all 3 phases |
 
 ## MCP Servers Used
 
@@ -37,4 +38,4 @@
 
 | Timestamp | Type | Entry |
 |-----------|------|-------|
-| _Append a row each time you encounter a learning moment_ |
+| 2026-03-24T19:35:00Z | error-recovery | `toggleAllIncluded` callback initially placed before `filteredItems` and `allIncludedState` declarations. React hooks lint rule (`react-hooks/immutability`) caught the forward reference. Fix: moved callback after the derived values it depends on. |

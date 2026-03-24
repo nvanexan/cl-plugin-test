@@ -7,6 +7,7 @@ import { BudgetDialog } from "@/components/BudgetDialog"
 import { CommandPalette } from "@/components/CommandPalette"
 import { CategoryManager } from "@/components/CategoryManager"
 import { Badge } from "@/components/ui/badge"
+import { Checkbox } from "@/components/ui/checkbox"
 import { ArrowUp, ArrowDown, ArrowUpDown } from "lucide-react"
 
 export interface Item {
@@ -146,6 +147,25 @@ export default function App() {
       ? items
       : items.filter((item) => item.category === selectedCategory)
 
+  const allIncludedState = useMemo((): boolean | "indeterminate" => {
+    if (filteredItems.length === 0) return false
+    const allIncluded = filteredItems.every((item) => item.included)
+    const noneIncluded = filteredItems.every((item) => !item.included)
+    if (allIncluded) return true
+    if (noneIncluded) return false
+    return "indeterminate"
+  }, [filteredItems])
+
+  const toggleAllIncluded = useCallback(() => {
+    const filteredIds = new Set(filteredItems.map((item) => item.id))
+    const newIncluded = allIncludedState !== true
+    setItems((prev) =>
+      prev.map((item) =>
+        filteredIds.has(item.id) ? { ...item, included: newIncluded } : item
+      )
+    )
+  }, [filteredItems, allIncludedState, setItems])
+
   const taxMultiplier = 1 + taxRate / 100
 
   const handleSort = useCallback((column: SortColumn) => {
@@ -262,6 +282,17 @@ export default function App() {
             )}
           </div>
 
+          {filteredItems.length > 0 && (
+            <div className="md:hidden flex items-center gap-2 mb-4">
+              <Checkbox
+                checked={allIncludedState}
+                onCheckedChange={toggleAllIncluded}
+                aria-label="Select all items"
+              />
+              <span className="text-sm text-muted-foreground">Include all</span>
+            </div>
+          )}
+
           {filteredItems.length === 0 ? (
             <div className="text-center py-12 text-muted-foreground">
               No items yet. Press{" "}
@@ -274,7 +305,13 @@ export default function App() {
             <div className="space-y-2">
               {/* Desktop Table Header */}
               <div className="hidden md:grid md:grid-cols-12 gap-4 px-4 pb-2 border-b border-border text-sm font-medium text-muted-foreground">
-                <div className="col-span-1">Include</div>
+                <div className="col-span-1">
+                  <Checkbox
+                    checked={allIncludedState}
+                    onCheckedChange={toggleAllIncluded}
+                    aria-label="Select all items"
+                  />
+                </div>
                 <button className="col-span-4 flex items-center gap-1 hover:text-foreground transition-colors text-left" onClick={() => handleSort("name")}>
                   Item
                   {sortColumn === "name" ? (sortDirection === "asc" ? <ArrowUp className="h-3 w-3" /> : <ArrowDown className="h-3 w-3" />) : <ArrowUpDown className="h-3 w-3 opacity-0 group-hover:opacity-100" />}

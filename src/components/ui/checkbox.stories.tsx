@@ -45,6 +45,21 @@ export const WithLabel: Story = {
   ),
 };
 
+export const Indeterminate: Story = {
+  args: {
+    checked: "indeterminate",
+  },
+};
+
+export const IndeterminateWithLabel: Story = {
+  render: (args) => (
+    <div className="flex items-center gap-2">
+      <Checkbox {...args} id="select-all" checked="indeterminate" />
+      <Label htmlFor="select-all">Select all items</Label>
+    </div>
+  ),
+};
+
 export const Multiple: Story = {
   render: (args) => (
     <div className="space-y-3">

@@ -1,6 +1,6 @@
 # Technical Plan: Issue #6 - Add select/deselect all checkbox to item grid
 
-**Status:** Approved
+**Status:** Complete
 **Branch:** feat/select-all-checkbox-issue-6
 **Created:** 2026-03-24T19:23:00Z
 **Issue:** #6
@@ -29,15 +29,15 @@ Add the select-all logic and UI directly to `App.tsx` since all item state alrea
 
 **Goal:** Add the select-all checkbox to the desktop table header with full tri-state behavior.
 
-- [ ] Task 1.1: Add `allIncludedState` derived value
+- [x] Task 1.1: Add `allIncludedState` derived value
   - Files: `src/App.tsx`
   - Notes: Compute from `filteredItems`. If all `included: true` → `true`. If all `included: false` → `false`. Otherwise → `"indeterminate"`. Use `useMemo` for consistency with existing patterns.
 
-- [ ] Task 1.2: Add `toggleAllIncluded` callback
+- [x] Task 1.2: Add `toggleAllIncluded` callback
   - Files: `src/App.tsx`
   - Notes: Wrap in `useCallback`. Build a `Set` of filtered item IDs. If current state is `true` (all included), set all filtered items to `included: false`. Otherwise, set all filtered items to `included: true`. Use `setItems(prev => prev.map(...))` pattern — only flip items whose ID is in the filtered set, leave others unchanged.
 
-- [ ] Task 1.3: Replace desktop header "Include" text with Checkbox
+- [x] Task 1.3: Replace desktop header "Include" text with Checkbox
   - Files: `src/App.tsx` (line ~277)
   - Notes: Import `Checkbox` (already imported in EquipmentItem but not in App). Replace `<div className="col-span-1">Include</div>` with a `Checkbox` bound to `allIncludedState` and `toggleAllIncluded`. Add `aria-label="Select all items"` for accessibility.
 
@@ -51,7 +51,7 @@ Add the select-all logic and UI directly to `App.tsx` since all item state alrea
 
 **Goal:** Add the select-all checkbox to the mobile layout.
 
-- [ ] Task 2.1: Add mobile "Include all" checkbox row
+- [x] Task 2.1: Add mobile "Include all" checkbox row
   - Files: `src/App.tsx`
   - Notes: Add between the category filter badges and the card list (inside the `filteredItems.length > 0` branch). Use `md:hidden` to show only on mobile. Layout: flex row with `Checkbox` + `<span>Include all</span>` label. Same `allIncludedState` and `toggleAllIncluded` bindings as desktop.
 
@@ -64,7 +64,7 @@ Add the select-all logic and UI directly to `App.tsx` since all item state alrea
 
 **Goal:** Add story coverage for the new checkbox states.
 
-- [ ] Task 3.1: Update or add stories showing select-all behavior
+- [x] Task 3.1: Update or add stories showing select-all behavior
   - Files: New story or update to existing stories
   - Notes: Since the select-all checkbox lives in `App.tsx` (not a standalone component), consider adding stories that demonstrate the tri-state checkbox pattern using the `Checkbox` primitive directly. Add stories to `src/components/ui/checkbox.stories.tsx` showing: Default checked, Unchecked, and Indeterminate states with `checked="indeterminate"`.
 
